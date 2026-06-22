@@ -2,6 +2,8 @@
 #include <vector>
 #include <algorithm>
 #include <string>
+#include <cmath>
+
 using namespace std;
 
 class Job {
@@ -12,7 +14,7 @@ public:
     int assignedWorker = -1;
 
     Job(int id, int burstTime, int priority = 5)
-        : id(id), burstTime(burstTime), remainingTime(burstTime), priority(priority) {}
+        : id(id), burstTime(max(0, burstTime)), remainingTime(max(0, burstTime)), priority(priority) {}
 };
 
 class Worker {
@@ -20,16 +22,16 @@ public:
     int id, capacity;
     int currentJobId = -1;
     bool isBusy = false;
+    double assignedLoad = 0.0;
 
-    Worker(int id, int capacity) : id(id), capacity(capacity) {}
+    Worker(int id, int capacity) : id(id), capacity(max(0, capacity)) {}
 
-    bool canTakeNewJob() {
-        return !isBusy && capacity > 0;
-    }
+    bool canTakeNewJob() { return !isBusy && capacity > 0; }
 
     void assignJob(Job* job) {
         currentJobId = job->id;
         isBusy = true;
+        assignedLoad += ceil((double)job->burstTime / capacity);
     }
 
     void doWork(vector<Job>& jobs) {
@@ -56,34 +58,47 @@ public:
     virtual ~SchedulingStrategy() = default;
 };
 
-class ShortestJobFirst : public SchedulingStrategy {
+class FCFS : public SchedulingStrategy {
 public:
-    string getStrategyName() override { return "Shortest-Job-First"; }
-
+    string getStrategyName() override { return "FCFS"; }
     vector<Job*> pickJobs(vector<Job>& jobs, vector<Worker>& workers) override {
         vector<Job*> pending;
-        for (auto& j : jobs) {
-            if (!j.isCompleted && !j.isRunning && j.remainingTime > 0) {
-                pending.push_back(&j);
+        for (auto& j : jobs) if (!j.isCompleted && !j.isRunning && j.remainingTime > 0) pending.push_back(&j);
+        if (pending.empty()) return {};
+
+        sort(pending.begin(), pending.end(), [](Job* a, Job* b) { return a->id < b->id; });
+
+        vector<Job*> result;
+        vector<bool> picked(pending.size(), false);
+        for (auto& w : workers) {
+            if (!w.canTakeNewJob()) continue;
+            for (size_t i = 0; i < pending.size(); i++) {
+                if (!picked[i]) { result.push_back(pending[i]); picked[i] = true; break; }
             }
         }
+        return result;
+    }
+};
+
+class SJF : public SchedulingStrategy {
+public:
+    string getStrategyName() override { return "SJF"; }
+    vector<Job*> pickJobs(vector<Job>& jobs, vector<Worker>& workers) override {
+        vector<Job*> pending;
+        for (auto& j : jobs) if (!j.isCompleted && !j.isRunning && j.remainingTime > 0) pending.push_back(&j);
         if (pending.empty()) return {};
 
         sort(pending.begin(), pending.end(), [](Job* a, Job* b) {
-            return a->remainingTime < b->remainingTime;
+            if (a->remainingTime != b->remainingTime) return a->remainingTime < b->remainingTime;
+            return a->id < b->id;
         });
 
         vector<Job*> result;
         vector<bool> picked(pending.size(), false);
-
         for (auto& w : workers) {
             if (!w.canTakeNewJob()) continue;
             for (size_t i = 0; i < pending.size(); i++) {
-                if (!picked[i]) {
-                    result.push_back(pending[i]);
-                    picked[i] = true;
-                    break;
-                }
+                if (!picked[i]) { result.push_back(pending[i]); picked[i] = true; break; }
             }
         }
         return result;
@@ -91,123 +106,100 @@ public:
 };
 
 class PriorityAging : public SchedulingStrategy {
-private:
     int agingDivisor;
 public:
-    PriorityAging(int divisor = 3) : agingDivisor(max(1, divisor)) {}
-
+    PriorityAging(int d = 3) : agingDivisor(max(1, d)) {}
     string getStrategyName() override { return "Priority-Aging"; }
 
     vector<Job*> pickJobs(vector<Job>& jobs, vector<Worker>& workers) override {
         vector<Job*> pending;
-        for (auto& j : jobs) {
-            if (!j.isCompleted && !j.isRunning && j.remainingTime > 0) {
-                pending.push_back(&j);
-            }
-        }
+        for (auto& j : jobs) if (!j.isCompleted && !j.isRunning && j.remainingTime > 0) pending.push_back(&j);
         if (pending.empty()) return {};
 
         sort(pending.begin(), pending.end(), [this](Job* a, Job* b) {
             int ea = a->priority - (a->waitTime / agingDivisor);
             int eb = b->priority - (b->waitTime / agingDivisor);
-            return ea < eb;
+            if (ea != eb) return ea < eb;
+            return a->id < b->id;
         });
 
         vector<Job*> result;
         vector<bool> picked(pending.size(), false);
-
         for (auto& w : workers) {
             if (!w.canTakeNewJob()) continue;
             for (size_t i = 0; i < pending.size(); i++) {
-                if (!picked[i]) {
-                    result.push_back(pending[i]);
-                    picked[i] = true;
-                    break;
-                }
+                if (!picked[i]) { result.push_back(pending[i]); picked[i] = true; break; }
             }
         }
         return result;
     }
 };
 
-class KnapsackDP : public SchedulingStrategy {
-private:
-    static const int MAX_CAP = 10000;
+class HRRN : public SchedulingStrategy {
 public:
-    string getStrategyName() override { return "Knapsack-DP"; }
+    string getStrategyName() override { return "HRRN"; }
 
     vector<Job*> pickJobs(vector<Job>& jobs, vector<Worker>& workers) override {
         vector<Job*> pending;
-        for (auto& j : jobs) {
-            if (!j.isCompleted && !j.isRunning && j.remainingTime > 0) {
-                pending.push_back(&j);
-            }
-        }
+        for (auto& j : jobs) if (!j.isCompleted && !j.isRunning && j.remainingTime > 0) pending.push_back(&j);
         if (pending.empty()) return {};
 
-        int totalCap = 0;
-        int maxWorkerCap = 0;
+        sort(pending.begin(), pending.end(), [](Job* a, Job* b) {
+            double rrA = (double)(a->waitTime + a->burstTime) / max(1, a->burstTime);
+            double rrB = (double)(b->waitTime + b->burstTime) / max(1, b->burstTime);
+            if (rrA != rrB) return rrA > rrB;
+            return a->id < b->id; 
+        });
+
+        vector<Job*> result;
+        vector<bool> picked(pending.size(), false);
         for (auto& w : workers) {
-            if (w.canTakeNewJob()) {
-                totalCap += w.capacity;
-                maxWorkerCap = max(maxWorkerCap, w.capacity);
+            if (!w.canTakeNewJob()) continue;
+            for (size_t i = 0; i < pending.size(); i++) {
+                if (!picked[i]) { result.push_back(pending[i]); picked[i] = true; break; }
             }
         }
+        return result;
+    }
+};
 
-        if (totalCap <= 0 || maxWorkerCap <= 0) return {};
+class LoadBalancing : public SchedulingStrategy {
+public:
+    string getStrategyName() override { return "Load-Balancing"; }
 
-        // ---- CAP BOTH TO MAX_CAP ----
-        totalCap = min(totalCap, MAX_CAP);
-        maxWorkerCap = min(maxWorkerCap, totalCap);  // <-- FIX: now consistent
+    vector<Job*> pickJobs(vector<Job>& jobs, vector<Worker>& workers) override {
+        vector<Job*> pending;
+        for (auto& j : jobs) if (!j.isCompleted && !j.isRunning && j.remainingTime > 0) pending.push_back(&j);
+        if (pending.empty()) return {};
 
-        int n = pending.size();
-        vector<int> val(n), wt(n);
-        for (int i = 0; i < n; i++) {
-            val[i] = max(1, 10 - pending[i]->priority);
-            wt[i] = min(pending[i]->remainingTime, maxWorkerCap);
+       
+        sort(pending.begin(), pending.end(), [](Job* a, Job* b) {
+            if (a->remainingTime != b->remainingTime) return a->remainingTime > b->remainingTime;
+            return a->id < b->id;
+        });
+
+        vector<Job*> result;
+        int freeCount = 0;
+        for (auto& w : workers) if (w.canTakeNewJob()) freeCount++;
+
+        for (int i = 0; i < freeCount && i < (int)pending.size(); i++) {
+            result.push_back(pending[i]);
         }
-
-        vector<int> dp(totalCap + 1, 0);
-        vector<vector<bool>> keep(n, vector<bool>(totalCap + 1, false));
-
-        for (int i = 0; i < n; i++) {
-            for (int c = totalCap; c >= wt[i]; c--) {
-                int newVal = dp[c - wt[i]] + val[i];
-                if (newVal > dp[c]) {
-                    dp[c] = newVal;
-                    keep[i][c] = true;
-                }
-            }
-        }
-
-        vector<Job*> chosen;
-        int rem = totalCap;
-        for (int i = n - 1; i >= 0; i--) {
-            if (keep[i][rem]) {
-                chosen.push_back(pending[i]);
-                rem -= wt[i];
-            }
-        }
-
-        return chosen;
+        return result;
     }
 };
 
 class SchedulerEngine {
-private:
     vector<Job> jobs;
     vector<Worker> workers;
     SchedulingStrategy* strategy;
 
 public:
-    SchedulerEngine(const vector<Job>& jobList, const vector<Worker>& workerList,
-                    SchedulingStrategy* strat)
-        : jobs(jobList), workers(workerList), strategy(strat) {}
+    SchedulerEngine(const vector<Job>& jl, const vector<Worker>& wl, SchedulingStrategy* s)
+        : jobs(jl), workers(wl), strategy(s) {}
 
     bool allJobsDone() {
-        for (auto& j : jobs) {
-            if (!j.isCompleted) return false;
-        }
+        for (auto& j : jobs) if (!j.isCompleted) return false;
         return true;
     }
 
@@ -219,28 +211,26 @@ public:
             j.waitTime = 0;
             j.assignedWorker = -1;
         }
-
         for (auto& w : workers) {
             w.isBusy = false;
             w.currentJobId = -1;
+            w.assignedLoad = 0.0;
         }
 
         int tick = 0;
-        string prevRunningMsg = "";
+        string prevRun = "";
         bool skipped = false;
 
         while (!allJobsDone() && tick < maxTicks) {
-            string doneMsg = "";
-            string assignMsg = "";
-            string runningMsg = "";
+            string doneMsg, assignMsg, runMsg;
 
             for (auto& w : workers) {
                 if (w.isBusy) {
-                    int jobId = w.currentJobId;
+                    int jid = w.currentJobId;
                     w.doWork(jobs);
                     if (!w.isBusy) {
                         for (auto& j : jobs) {
-                            if (j.id == jobId && j.remainingTime <= 0) {
+                            if (j.id == jid && j.remainingTime <= 0) {
                                 j.isCompleted = true;
                                 j.isRunning = false;
                                 doneMsg += "J" + to_string(j.id) + " DONE! ";
@@ -251,60 +241,61 @@ public:
                 }
             }
 
-            for (auto& j : jobs) {
-                if (!j.isCompleted && !j.isRunning) {
-                    j.waitTime++;
+            for (auto& j : jobs) if (!j.isCompleted && !j.isRunning) j.waitTime++;
+
+            auto picks = strategy->pickJobs(jobs, workers);
+
+            if (strategy->getStrategyName() == "Load-Balancing") {
+                vector<Worker*> freeWorkers;
+                for (auto& w : workers) if (w.canTakeNewJob()) freeWorkers.push_back(&w);
+
+               
+                sort(freeWorkers.begin(), freeWorkers.end(), [](Worker* a, Worker* b) {
+                    if (a->assignedLoad != b->assignedLoad) return a->assignedLoad < b->assignedLoad;
+                    return a->capacity > b->capacity; 
+                });
+
+                size_t pi = 0;
+                for (auto* w : freeWorkers) {
+                    if (pi < picks.size()) {
+                        w->assignJob(picks[pi]);
+                        picks[pi]->isRunning = true;
+                        picks[pi]->assignedWorker = w->id;
+                        assignMsg += "J" + to_string(picks[pi]->id) + "->W" + to_string(w->id) + " ";
+                        pi++;
+                    }
+                }
+            } else {
+                size_t pi = 0;
+                for (auto& w : workers) {
+                    if (w.canTakeNewJob() && pi < picks.size()) {
+                        w.assignJob(picks[pi]);
+                        picks[pi]->isRunning = true;
+                        picks[pi]->assignedWorker = w.id;
+                        assignMsg += "J" + to_string(picks[pi]->id) + "->W" + to_string(w.id) + " ";
+                        pi++;
+                    }
                 }
             }
 
-            vector<Job*> picks = strategy->pickJobs(jobs, workers);
-
-            int pickIdx = 0;
-            for (auto& w : workers) {
-                if (w.canTakeNewJob() && pickIdx < (int)picks.size()) {
-                    Job* best = picks[pickIdx];
-                    w.assignJob(best);
-                    best->isRunning = true;
-                    best->assignedWorker = w.id;
-                    assignMsg += "J" + to_string(best->id) + "->W" + to_string(w.id) + " ";
-                    pickIdx++;
-                }
-            }
-
-            for (auto& w : workers) {
-                if (w.isBusy) {
-                    runningMsg += "J" + to_string(w.currentJobId) + "->W" + to_string(w.id) + " ";
-                }
-            }
+            for (auto& w : workers) if (w.isBusy) runMsg += "J" + to_string(w.currentJobId) + "->W" + to_string(w.id) + " ";
 
             if (verbose) {
-                bool hasChange = !assignMsg.empty() || !doneMsg.empty() || runningMsg != prevRunningMsg;
-
-                if (hasChange) {
-                    if (skipped) {
-                        cout << "...\n";
-                        skipped = false;
-                    }
+                bool changed = !assignMsg.empty() || !doneMsg.empty() || runMsg != prevRun;
+                if (changed) {
+                    if (skipped) { cout << "...\n"; skipped = false; }
                     cout << "Tick " << tick << " -> ";
                     if (!assignMsg.empty()) cout << assignMsg;
                     if (!doneMsg.empty()) cout << doneMsg;
-                    if (!runningMsg.empty() && assignMsg.empty() && doneMsg.empty()) cout << runningMsg;
-                    if (assignMsg.empty() && doneMsg.empty() && runningMsg.empty()) cout << "Idle";
+                    if (runMsg != "" && assignMsg.empty() && doneMsg.empty()) cout << runMsg;
+                    if (assignMsg.empty() && doneMsg.empty() && runMsg.empty()) cout << "Idle";
                     cout << "\n";
-                } else {
-                    skipped = true;
-                }
-
-                prevRunningMsg = runningMsg;
+                } else { skipped = true; }
+                prevRun = runMsg;
             }
-
             tick++;
         }
-
-        if (verbose) {
-            cout << "Ticks: " << tick << "\n\n";
-        }
-
+        if (verbose) cout << "Ticks: " << tick << "\n\n";
         return tick;
     }
 };
@@ -316,46 +307,39 @@ int main() {
     int n, m;
     if (!(cin >> n)) return 1;
 
-    vector<Job> baseJobs;
+    vector<Job> jobs;
     for (int i = 0; i < n; i++) {
-        int id, b, p;
-        cin >> id >> b >> p;
-        baseJobs.emplace_back(id, b, p);
+        int id, b, p; cin >> id >> b >> p;
+        jobs.emplace_back(id, b, p);
     }
 
     cin >> m;
-    vector<Worker> baseWorkers;
+    vector<Worker> workers;
     for (int i = 0; i < m; i++) {
-        int id, c;
-        cin >> id >> c;
-        baseWorkers.emplace_back(id, c);
+        int id, c; cin >> id >> c;
+        workers.emplace_back(id, c);
     }
 
-    ShortestJobFirst sjf;
-    SchedulerEngine e1(baseJobs, baseWorkers, &sjf);
-    int t1 = e1.runSimulation(10000, false);
+    FCFS fcfs; SJF sjf; PriorityAging aging(2); HRRN hrrn; LoadBalancing lb;
 
-    PriorityAging aging(2);
-    SchedulerEngine e2(baseJobs, baseWorkers, &aging);
-    int t2 = e2.runSimulation(10000, false);
-
-    KnapsackDP dp;
-    SchedulerEngine e3(baseJobs, baseWorkers, &dp);
-    int t3 = e3.runSimulation(10000, false);
+    SchedulerEngine e1(jobs, workers, &fcfs); int t1 = e1.runSimulation(10000, false);
+    SchedulerEngine e2(jobs, workers, &sjf); int t2 = e2.runSimulation(10000, false);
+    SchedulerEngine e3(jobs, workers, &aging); int t3 = e3.runSimulation(10000, false);
+    SchedulerEngine e4(jobs, workers, &hrrn); int t4 = e4.runSimulation(10000, false);
+    SchedulerEngine e5(jobs, workers, &lb); int t5 = e5.runSimulation(10000, false);
 
     cout << "=== COMPARISON ===\n";
-    cout << "SJF  : " << t1 << " ticks\n";
-    cout << "Aging: " << t2 << " ticks\n";
-    cout << "DP   : " << t3 << " ticks\n\n";
+    cout << "FCFS        : " << t1 << " ticks\n";
+    cout << "SJF         : " << t2 << " ticks\n";
+    cout << "Aging       : " << t3 << " ticks\n";
+    cout << "HRRN        : " << t4 << " ticks\n";
+    cout << "Load-Balance: " << t5 << " ticks\n\n";
 
-    cout << "=== Shortest-Job-First ===\n";
-    e1.runSimulation(10000, true);
-
-    cout << "=== Priority-Aging ===\n";
-    e2.runSimulation(10000, true);
-
-    cout << "=== Knapsack-DP ===\n";
-    e3.runSimulation(10000, true);
+    cout << "=== FCFS ===\n"; e1.runSimulation(10000, true);
+    cout << "=== SJF ===\n"; e2.runSimulation(10000, true);
+    cout << "=== Priority-Aging ===\n"; e3.runSimulation(10000, true);
+    cout << "=== HRRN ===\n"; e4.runSimulation(10000, true);
+    cout << "=== Load-Balancing ===\n"; e5.runSimulation(10000, true);
 
     return 0;
 }
